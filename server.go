@@ -9,13 +9,27 @@ import (
 type Server struct {
 	addr    string
 	run     bool
-	clients map[net.Conn]bool
+	clients map[*Client]bool
+}
+
+type Client struct {
+	conn    net.Conn
+	packets chan []byte
+	server  *Server
+}
+
+func NewClient(conn net.Conn, server *Server) *Client {
+	client := new(Client)
+	client.conn = conn
+	client.server = server
+	client.packets = make(chan []byte)
+	return client
 }
 
 func NewServer(addr string) *Server {
 	server := new(Server)
 	server.addr = addr
-	server.clients = make(map[net.Conn]bool)
+	server.clients = make(map[*Client]bool)
 	return server
 }
 
@@ -36,36 +50,59 @@ func (server *Server) Start() {
 	ln.Close()
 }
 
-func (server *Server) BroadcastPacket(conn net.Conn, packet []byte) {
+func (server *Server) BroadcastPacket(client *Client, packet []byte) {
 	for c := range server.clients {
-		if c == conn {
-			continue
+		/*
+		   if c == client {
+		       continue
+		   }
+		*/
+		go c.SendPacket(packet)
+	}
+}
+
+func (client *Client) SendPacket(packet []byte) {
+	client.packets <- packet
+}
+
+func (client *Client) StartReceive() {
+	for {
+		packet, err := ReadPacket(client.conn)
+		if err != nil {
+			break
 		}
-		go c.Write(packet)
+		log.Print(string(packet[4:]))
+		go client.server.BroadcastPacket(client, packet)
+	}
+	log.Printf("Client disconnected from %s\n", client.conn.RemoteAddr().String())
+	delete(client.server.clients, client)
+	client.conn.Close()
+}
+
+func (client *Client) StartSend() {
+	for {
+		packet := <-client.packets
+		_, err := client.conn.Write(packet)
+		if err != nil {
+			break
+		}
+		log.Printf("Message dilivered to %s\n", client.conn.RemoteAddr().String())
 	}
 }
 
 func (server *Server) HandleConnection(conn net.Conn) {
 	addr := conn.RemoteAddr()
+	client := NewClient(conn, server)
 	log.Printf("Client connected from %s\n", addr.String())
-	server.clients[conn] = true
-	for {
-		packet, err := ReadPacket(conn)
-        log.Print(string(packet[4:]))
-		if err != nil {
-			break
-		}
-		go server.BroadcastPacket(conn, packet)
-	}
-	log.Printf("Client disconnected from %s\n", addr.String())
-	delete(server.clients, conn)
-	conn.Close()
+	server.clients[client] = true
+	go client.StartReceive()
+	go client.StartSend()
 }
 
 func ReadPacket(r io.Reader) (packet []byte, err error) {
 	size_buf := make([]byte, 4)
 	n, err := io.ReadFull(r, size_buf)
-	if err != nil {
+	if err != nil || n < 4 {
 		log.Printf("%d bytes read.\n", n)
 		return nil, err
 	}
@@ -75,7 +112,7 @@ func ReadPacket(r io.Reader) (packet []byte, err error) {
 	}
 	data_buf := make([]byte, l)
 	n, err = io.ReadFull(r, data_buf)
-	if err != nil {
+	if err != nil || n < l {
 		return nil, err
 	}
 	packet = make([]byte, 4+n)
