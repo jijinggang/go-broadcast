@@ -110,6 +110,10 @@ func ReadPacket(r io.Reader) (packet []byte, err error) {
 	for i := 0; i < 4; i++ {
 		l = (l << 8) + int(size_buf[i])
 	}
+	const MAX_BUFF_SIZE = 10240;
+	if l > MAX_BUFF_SIZE {
+		return nil, errors.New("too long buffer len")
+	}
 	data_buf := make([]byte, l)
 	n, err = io.ReadFull(r, data_buf)
 	if err != nil || n < l {
